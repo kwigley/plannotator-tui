@@ -13,6 +13,8 @@ crates/plannotator-tui          the app: parse → layout → draw → input. Ta
                           modules behind a trait so the app has one seam per external system.
 herdr/                    the Herdr plugin manifest. The launcher it runs is
                           `plannotator-tui herdr open` (src/herdr/); no shell logic here.
+src/rex/                  the Rex launchers (`plannotator-tui rex …`) and delivery, driven
+                          through the `rex` CLI.
 ```
 
 Markdown parsing is `pulldown-cmark`; rendering to styled text is `tui-markdown`. We never
