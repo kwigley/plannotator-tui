@@ -1,14 +1,14 @@
-//! `plannotator-tui rex last|open|terminal`: find the agent in a Rex block and open
-//! plannotator-tui in a split to its right, wired to send feedback back to the block. A split is an ordinary pane,
-//! so it keeps Rex's frame and theme. `foreground`, `command` and `split` are pure; only `run`
-//! touches Rex.
+//! `plannotator-tui rex last|open|terminal|find`: find the agent in a Rex block and open
+//! plannotator-tui in a split to its right, wired to send feedback back to the block. A split
+//! is an ordinary pane, so it keeps Rex's frame and theme. `foreground`, `argv` and `split`
+//! are pure; only `run` touches Rex.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use super::agent::{AGENT_VAR, BLOCK_VAR, SUBMIT_VAR};
+use super::agent::{AGENT_VAR, BLOCK_VAR, PID_VAR, SUBMIT_VAR};
 use super::command::Rex;
 use crate::herdr::launch::known_host;
 
@@ -21,11 +21,14 @@ pub(crate) enum Review {
     Open(Option<PathBuf>),
     /// The block's last `lines` lines of output.
     Terminal { lines: u32 },
+    /// The newest Markdown file named in the block's last `lines` lines of output. `run`
+    /// turns it into an `Open`.
+    Find { lines: u32 },
 }
 
 /// How feedback reaches the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Delivery {
+pub(crate) enum Handoff {
     /// As its next message.
     Send,
     /// Into its prompt, for you to edit and submit.
@@ -55,43 +58,44 @@ pub(crate) fn foreground(process: &Value) -> Option<Foreground> {
 }
 
 /// The argv the pane runs: `env` sets the delivery target, then `plannotator-tui rex pane`
-/// opens the review.
-/// Without an agent in the block, feedback goes to the clipboard.
-pub(crate) fn command(
+/// opens the review. Without an agent in the block, feedback goes to the clipboard.
+pub(crate) fn argv(
     exe: &Path,
     block: &str,
     fg: &Foreground,
     review: &Review,
-    delivery: Delivery,
+    handoff: Handoff,
 ) -> Result<Vec<String>> {
-    let mut argv = vec!["/usr/bin/env".to_owned()];
+    let mut args = vec!["/usr/bin/env".to_owned()];
     if let Some(host) = fg.host {
-        argv.push(format!("{BLOCK_VAR}={block}"));
-        argv.push(format!("{AGENT_VAR}={host}"));
-        if delivery == Delivery::Paste {
-            argv.push(format!("{SUBMIT_VAR}=0"));
+        args.push(format!("{BLOCK_VAR}={block}"));
+        args.push(format!("{AGENT_VAR}={host}"));
+        args.push(format!("{PID_VAR}={}", fg.pid));
+        if handoff == Handoff::Paste {
+            args.push(format!("{SUBMIT_VAR}=0"));
         }
     }
-    argv.extend([exe.display().to_string(), "rex".to_owned(), "pane".to_owned()]);
+    args.extend([exe.display().to_string(), "rex".to_owned(), "pane".to_owned()]);
     match review {
         Review::Last { newest } => {
             let host = fg.host.context("no supported agent runs in this block")?;
-            argv.extend(["last".to_owned(), "--pid".to_owned(), fg.pid.to_string()]);
-            argv.extend(["--host".to_owned(), host.to_owned()]);
+            args.extend(["last".to_owned(), "--pid".to_owned(), fg.pid.to_string()]);
+            args.extend(["--host".to_owned(), host.to_owned()]);
             if *newest {
-                argv.push("--newest".to_owned());
+                args.push("--newest".to_owned());
             }
         }
         Review::Open(path) => {
             let path = path.clone().or_else(|| fg.cwd.clone()).context("no file or folder to open")?;
-            argv.extend(["open".to_owned(), path.display().to_string()]);
+            args.extend(["open".to_owned(), path.display().to_string()]);
         }
         Review::Terminal { lines } => {
-            argv.extend(["terminal", "--block", block, "--lines"].map(str::to_owned));
-            argv.push(lines.to_string());
+            args.extend(["terminal", "--block", block, "--lines"].map(str::to_owned));
+            args.push(lines.to_string());
         }
+        Review::Find { .. } => anyhow::bail!("a find review is resolved to an open before the split"),
     }
-    Ok(argv)
+    Ok(args)
 }
 
 /// The `session.new_split` arguments for `argv`, to the right of `block`, starting in `cwd`.
@@ -111,13 +115,27 @@ pub(crate) fn split(block: &str, cwd: Option<&Path>, argv: &[String]) -> Value {
     })
 }
 
+/// The Markdown file a `Find` names: the newest one in the block's last `lines` lines.
+fn newest_markdown(rex: &Rex, block: &str, fg: &Foreground, lines: u32) -> Result<PathBuf> {
+    let text = super::terminal::read(rex, block, lines)?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    super::paths::markdown_files(&text, fg.cwd.as_deref(), home.as_deref())
+        .into_iter()
+        .next()
+        .with_context(|| format!("no Markdown file named in the last {lines} lines of block {block}"))
+}
+
 /// Open the review in a split to the right of `block`.
-pub(crate) fn run(rex: &Rex, block: &str, review: &Review, delivery: Delivery) -> Result<()> {
+pub(crate) fn run(rex: &Rex, block: &str, review: &Review, handoff: Handoff) -> Result<()> {
     let process = rex.terminal_method(block, "process")?;
     let fg = foreground(&process).with_context(|| format!("block {block} has no foreground process"))?;
     let exe = std::env::current_exe().context("finding the plannotator-tui binary")?;
-    let argv = command(&exe, block, &fg, review, delivery)?;
-    rex.api("session.new_split", &split(block, fg.cwd.as_deref(), &argv))?;
+    let review = match review {
+        Review::Find { lines } => Review::Open(Some(newest_markdown(rex, block, &fg, *lines)?)),
+        other => other.clone(),
+    };
+    let args = argv(&exe, block, &fg, &review, handoff)?;
+    rex.api("session.new_split", &split(block, fg.cwd.as_deref(), &args))?;
     Ok(())
 }
 
@@ -145,20 +163,21 @@ mod tests {
 
     #[test]
     fn last_reads_the_agents_pid_and_sends_back_to_its_block() {
-        let argv = command(
+        let args = argv(
             Path::new("/bin/pt"),
             "block:b",
             &parse(CLAUDE),
             &Review::Last { newest: true },
-            Delivery::Send,
+            Handoff::Send,
         )
         .expect("argv");
         assert_eq!(
-            argv,
+            args,
             [
                 "/usr/bin/env",
                 "PLANNOTATOR_TUI_REX_BLOCK=block:b",
                 "PLANNOTATOR_TUI_DELIVER_AGENT=claude",
+                "PLANNOTATOR_TUI_REX_PID=60223",
                 "/bin/pt",
                 "rex",
                 "pane",
@@ -171,12 +190,12 @@ mod tests {
             ]
         );
         assert!(
-            command(
+            argv(
                 Path::new("/bin/pt"),
                 "block:b",
                 &parse(SHELL),
                 &Review::Last { newest: false },
-                Delivery::Send
+                Handoff::Send
             )
             .is_err()
         );
@@ -184,16 +203,15 @@ mod tests {
 
     #[test]
     fn open_without_an_agent_reviews_the_blocks_folder_and_copies_to_the_clipboard() {
-        let argv =
-            command(Path::new("/bin/pt"), "block:b", &parse(SHELL), &Review::Open(None), Delivery::Send)
-                .expect("argv");
-        assert_eq!(argv, ["/usr/bin/env", "/bin/pt", "rex", "pane", "open", "/Users/me"]);
+        let args = argv(Path::new("/bin/pt"), "block:b", &parse(SHELL), &Review::Open(None), Handoff::Send)
+            .expect("argv");
+        assert_eq!(args, ["/usr/bin/env", "/bin/pt", "rex", "pane", "open", "/Users/me"]);
     }
 
     #[test]
     fn pasting_is_passed_on_only_where_there_is_an_agent_to_paste_into() {
         let paste = |json| {
-            command(Path::new("/bin/pt"), "block:b", &parse(json), &Review::Open(None), Delivery::Paste)
+            argv(Path::new("/bin/pt"), "block:b", &parse(json), &Review::Open(None), Handoff::Paste)
                 .expect("argv")
         };
         assert!(paste(CLAUDE).contains(&"PLANNOTATOR_TUI_REX_SUBMIT=0".to_owned()));
@@ -202,16 +220,16 @@ mod tests {
 
     #[test]
     fn a_terminal_review_reads_the_block_from_inside_the_split() {
-        let argv = command(
+        let args = argv(
             Path::new("/bin/pt"),
             "block:b",
             &parse(SHELL),
             &Review::Terminal { lines: 80 },
-            Delivery::Send,
+            Handoff::Send,
         )
         .expect("argv");
         assert_eq!(
-            argv,
+            args,
             ["/usr/bin/env", "/bin/pt", "rex", "pane", "terminal", "--block", "block:b", "--lines", "80"]
         );
     }

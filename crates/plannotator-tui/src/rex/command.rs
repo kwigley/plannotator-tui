@@ -117,19 +117,20 @@ impl Rex {
     /// Call one of a terminal block's methods, such as `process` or `program_status`.
     pub(crate) fn terminal_method(&self, block: &str, method: &str) -> Result<Value, RexError> {
         let method = format!("com.superlogical.terminal.{method}");
-        let stdout = self.run(&["do", &method, "-b", block], None)?;
-        serde_json::from_str(&stdout).map_err(|err| {
-            RexError::Failed(anyhow::anyhow!("{method} returned something other than JSON: {err}"))
-        })
+        json(&method, &self.run(&["do", &method, "-b", block], None)?)
     }
 
     /// Call a server API method with `args`, sent on stdin so no text lands in `ps`.
     pub(crate) fn api(&self, method: &str, args: &Value) -> Result<Value, RexError> {
-        let stdout = self.run(&["api", "call", method, "-"], Some(&args.to_string()))?;
-        serde_json::from_str(&stdout).map_err(|err| {
-            RexError::Failed(anyhow::anyhow!("{method} returned something other than JSON: {err}"))
-        })
+        json(method, &self.run(&["api", "call", method, "-"], Some(&args.to_string()))?)
     }
+}
+
+/// What `method` printed, as JSON.
+fn json(method: &str, stdout: &str) -> Result<Value, RexError> {
+    serde_json::from_str(stdout).map_err(|err| {
+        RexError::Failed(anyhow::anyhow!("{method} returned something other than JSON: {err}"))
+    })
 }
 
 #[cfg(test)]

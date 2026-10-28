@@ -320,6 +320,7 @@ Each launcher opens the split and exits:
 plannotator-tui rex last [--newest]         # the agent's replies
 plannotator-tui rex open [file.md | folder] # a document, or the pane's folder
 plannotator-tui rex terminal [--lines N]    # the pane's recent output; --print writes it out
+plannotator-tui rex find [--lines N]        # the newest .md file the pane's output names
 ```
 
 The pane is `--block <id>`, else `REX_BLOCK`, so an agent that runs a launcher in its own

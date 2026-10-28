@@ -44,6 +44,7 @@ pub(crate) const USAGE: &str = "usage:
   plannotator-tui rex open [file.md | folder] [--block <id>] [--session <id>] [--paste]
   plannotator-tui rex last [--block <id>] [--session <id>] [--newest] [--paste]
   plannotator-tui rex terminal [--block <id>] [--session <id>] [--lines N] [--paste] [--print]
+  plannotator-tui rex find [--block <id>] [--session <id>] [--lines N] [--paste]
   plannotator-tui rex pane (open <path> | last <last args> | terminal --block <id> [--lines N])
   plannotator-tui last [--host claude|codex|pi|omp|copilot|droid|hermes|opencode|cmd|agy] [--pid N] [--session <transcript>]
                        [--session-id <id>] [--stdin] [--print] [--pick N] [--newest]";
