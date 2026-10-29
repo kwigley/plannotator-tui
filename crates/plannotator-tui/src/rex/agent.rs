@@ -1,7 +1,9 @@
 //! An agent running in a Rex block, as a delivery target.
 //!
 //! Sending pastes the feedback into the block as a paste event, so Rex wraps it in the
-//! bracketed-paste markers the agent asked for, then presses Enter. In paste mode it leaves
+//! bracketed-paste markers the agent asked for, then presses Enter. Once the paste lands the
+//! feedback is the agent's: if Enter fails, it waits in the prompt, the block takes focus, and
+//! the send still counts, so nothing pastes it twice. In paste mode it leaves
 //! Enter to you: the feedback waits in the agent's prompt and the block takes focus, ready to
 //! edit. Before writing anything it checks that the agent's process still runs in the block,
 //! so a block that fell back to a shell never receives the text, and asks the block's
@@ -35,9 +37,8 @@ pub(crate) struct RexAgent {
     pid: u32,
     /// Press Enter after the paste; `false` leaves the feedback in the prompt to edit.
     submit: bool,
-    /// Feedback that is in the agent's prompt but not yet submitted, because Enter failed. A
-    /// retry of the same feedback presses Enter again and does not paste it a second time.
-    pasted: RefCell<Option<String>>,
+    /// What the last send left for you to do: Enter, when it did not reach the agent.
+    notice: RefCell<Option<String>>,
 }
 
 impl RexAgent {
@@ -48,7 +49,7 @@ impl RexAgent {
         let pid = non_empty(PID_VAR)?.parse().ok()?;
         let rex = Rex::from_lookup(&env, None).ok()?;
         let submit = env(SUBMIT_VAR).as_deref() != Some("0");
-        Some(Self { rex, block, agent: non_empty(AGENT_VAR), pid, submit, pasted: RefCell::default() })
+        Some(Self { rex, block, agent: non_empty(AGENT_VAR), pid, submit, notice: RefCell::default() })
     }
 }
 
@@ -86,26 +87,27 @@ impl Delivery for RexAgent {
                 short_id(&self.block)
             )));
         }
-        if self.pasted.borrow().as_deref() != Some(feedback) {
-            let paste = json!({
-                "block_id": self.block,
-                "event": { "type": "paste", "payload": { "text": feedback } },
-            });
-            self.rex.api("block.event", &paste).map_err(unavailable)?;
+        self.notice.take();
+        let paste = json!({
+            "block_id": self.block,
+            "event": { "type": "paste", "payload": { "text": feedback } },
+        });
+        self.rex.api("block.event", &paste).map_err(unavailable)?;
+        // The feedback has landed in the agent's prompt. A failed Enter leaves it there, sent
+        // but unsubmitted: a failure here would invite a second paste on top of it.
+        if self.submit {
+            if self.rex.run(&["send-key", "-b", &self.block, "enter"], None).is_ok() {
+                return Ok(());
+            }
+            *self.notice.borrow_mut() = Some("Enter did not reach it; press Enter in its pane".to_owned());
         }
-        if !self.submit {
-            // Focus only helps you edit the prompt. The feedback has already landed.
-            let _ = self.rex.run(&["focus", &self.block], None);
-            return Ok(());
-        }
-        *self.pasted.borrow_mut() = Some(feedback.to_owned());
-        self.rex.run(&["send-key", "-b", &self.block, "enter"], None).map_err(|err| {
-            DeliveryError::Failed(anyhow::anyhow!(
-                "the feedback is in the agent's prompt but Enter did not land ({err}); press Enter in its pane"
-            ))
-        })?;
-        self.pasted.take();
+        // Focus only helps you edit or submit the prompt.
+        let _ = self.rex.run(&["focus", &self.block], None);
         Ok(())
+    }
+
+    fn notice(&self) -> Option<String> {
+        self.notice.take()
     }
 }
 
@@ -256,16 +258,19 @@ esac
 
     #[cfg(unix)]
     #[test]
-    fn a_retry_after_a_failed_enter_presses_enter_and_does_not_paste_again() {
-        let dir = fake_rex("retry");
+    fn a_failed_enter_after_the_paste_still_counts_as_sent_and_says_so() {
+        let dir = fake_rex("enter");
         let target = sender(&dir, "42");
         std::fs::write(dir.join("enter-fails"), "").expect("flag");
-        assert!(matches!(target.deliver("notes"), Err(DeliveryError::Failed(_))));
+        target.deliver("notes").expect("the paste landed, so the send counts");
+        assert_eq!(target.notice().as_deref(), Some("Enter did not reach it; press Enter in its pane"));
+        assert_eq!(target.notice(), None, "a notice is shown once");
+        let log = std::fs::read_to_string(dir.join("log")).expect("log");
+        assert!(log.lines().any(|l| l == "focus block:b"), "the block takes focus: {log}");
         std::fs::remove_file(dir.join("enter-fails")).expect("flag");
-        target.deliver("notes").expect("the retry sends");
-        assert_eq!(pastes(&dir), 1);
-        target.deliver("notes").expect("a later send");
-        assert_eq!(pastes(&dir), 2, "a send that landed starts over");
+        target.deliver("more notes").expect("a later send");
+        assert_eq!(target.notice(), None);
+        assert_eq!(pastes(&dir), 2, "each send pastes once");
         std::fs::remove_dir_all(dir).ok();
     }
 

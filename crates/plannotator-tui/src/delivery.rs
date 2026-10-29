@@ -47,6 +47,11 @@ pub(crate) trait Delivery {
         None
     }
     fn deliver(&self, feedback: &str) -> Result<(), DeliveryError>;
+    /// What the person still has to do after the last `deliver` succeeded, shown with its
+    /// status: the feedback reached the agent but did not finish, e.g. it waits unsubmitted.
+    fn notice(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The OSC 52 sequence that hands `text` to the terminal's clipboard.
