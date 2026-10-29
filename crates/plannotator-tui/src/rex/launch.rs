@@ -17,13 +17,20 @@ use crate::herdr::launch::known_host;
 pub(crate) enum Review {
     /// The agent's recent replies; `newest` skips the picker.
     Last { newest: bool },
-    /// A file or folder; the block's directory when `None`.
-    Open(Option<PathBuf>),
+    /// A file or folder; the block's directory when `None`. With a [`Gate`], the review can
+    /// be approved, as `herdr open --gate` does.
+    Open(Option<PathBuf>, Option<Gate>),
     /// The block's last `lines` lines of output.
     Terminal { lines: u32 },
     /// The newest Markdown file named in the block's last `lines` lines of output. `run`
     /// turns it into an `Open`.
     Find { lines: u32 },
+}
+
+/// `rex open --gate`: Approve beside Send, and where the decision is published.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Gate {
+    pub(crate) result_file: Option<PathBuf>,
 }
 
 /// How feedback reaches the agent.
@@ -85,9 +92,15 @@ pub(crate) fn argv(
                 args.push("--newest".to_owned());
             }
         }
-        Review::Open(path) => {
+        Review::Open(path, gate) => {
             let path = path.clone().or_else(|| fg.cwd.clone()).context("no file or folder to open")?;
             args.extend(["open".to_owned(), path.display().to_string()]);
+            if let Some(gate) = gate {
+                args.push("--gate".to_owned());
+                if let Some(file) = &gate.result_file {
+                    args.extend(["--result-file".to_owned(), file.display().to_string()]);
+                }
+            }
         }
         Review::Terminal { lines } => {
             args.extend(["terminal", "--block", block, "--lines"].map(str::to_owned));
@@ -131,7 +144,7 @@ pub(crate) fn run(rex: &Rex, block: &str, review: &Review, handoff: Handoff) -> 
     let fg = foreground(&process).with_context(|| format!("block {block} has no foreground process"))?;
     let exe = std::env::current_exe().context("finding the plannotator-tui binary")?;
     let review = match review {
-        Review::Find { lines } => Review::Open(Some(newest_markdown(rex, block, &fg, *lines)?)),
+        Review::Find { lines } => Review::Open(Some(newest_markdown(rex, block, &fg, *lines)?), None),
         other => other.clone(),
     };
     let args = argv(&exe, block, &fg, &review, handoff)?;
@@ -203,19 +216,33 @@ mod tests {
 
     #[test]
     fn open_without_an_agent_reviews_the_blocks_folder_and_copies_to_the_clipboard() {
-        let args = argv(Path::new("/bin/pt"), "block:b", &parse(SHELL), &Review::Open(None), Handoff::Send)
-            .expect("argv");
+        let args =
+            argv(Path::new("/bin/pt"), "block:b", &parse(SHELL), &Review::Open(None, None), Handoff::Send)
+                .expect("argv");
         assert_eq!(args, ["/usr/bin/env", "/bin/pt", "rex", "pane", "open", "/Users/me"]);
     }
 
     #[test]
     fn pasting_is_passed_on_only_where_there_is_an_agent_to_paste_into() {
         let paste = |json| {
-            argv(Path::new("/bin/pt"), "block:b", &parse(json), &Review::Open(None), Handoff::Paste)
+            argv(Path::new("/bin/pt"), "block:b", &parse(json), &Review::Open(None, None), Handoff::Paste)
                 .expect("argv")
         };
         assert!(paste(CLAUDE).contains(&"PLANNOTATOR_TUI_REX_SUBMIT=0".to_owned()));
         assert!(!paste(SHELL).iter().any(|arg| arg.starts_with("PLANNOTATOR_TUI_REX")));
+    }
+
+    #[test]
+    fn a_gated_open_hands_the_gate_and_its_result_file_to_the_pane() {
+        let gated = |gate| {
+            let review = Review::Open(Some(PathBuf::from("/p/plan.md")), Some(gate));
+            argv(Path::new("/bin/pt"), "block:b", &parse(CLAUDE), &review, Handoff::Send).expect("argv")
+        };
+        let tail = |args: &[String]| args.iter().skip_while(|a| *a != "open").cloned().collect::<Vec<_>>();
+        assert_eq!(tail(&gated(Gate::default())), ["open", "/p/plan.md", "--gate"]);
+        let published = gated(Gate { result_file: Some(PathBuf::from("/p/decision.json")) });
+        assert_eq!(tail(&published), ["open", "/p/plan.md", "--gate", "--result-file", "/p/decision.json"]);
+        assert!(published.contains(&"PLANNOTATOR_TUI_REX_BLOCK=block:b".to_owned()), "the agent hears it");
     }
 
     #[test]

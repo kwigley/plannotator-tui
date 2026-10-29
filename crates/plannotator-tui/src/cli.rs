@@ -42,10 +42,12 @@ pub(crate) const USAGE: &str = "usage:
   plannotator-tui herdr terminal [--lines N] [--placement P] [--deliver-to <pane>] [--print]
   plannotator-tui herdr pane
   plannotator-tui rex open [file.md | folder] [--block <id>] [--session <id>] [--paste]
+                           [--gate] [--result-file <path>]
   plannotator-tui rex last [--block <id>] [--session <id>] [--newest] [--paste]
   plannotator-tui rex terminal [--block <id>] [--session <id>] [--lines N] [--paste] [--print]
   plannotator-tui rex find [--block <id>] [--session <id>] [--lines N] [--paste]
-  plannotator-tui rex pane (open <path> | last <last args> | terminal --block <id> [--lines N])
+  plannotator-tui rex pane (open <path> [--gate [--result-file <path>]] | last <last args>
+                            | terminal --block <id> [--lines N])
   plannotator-tui last [--host claude|codex|pi|omp|copilot|droid|hermes|opencode|cmd|agy] [--pid N] [--session <transcript>]
                        [--session-id <id>] [--stdin] [--print] [--pick N] [--newest]";
 
@@ -145,7 +147,9 @@ fn wants_decision(args: &[String]) -> bool {
     let decision_flag = |arg: &String| gate::FLAGS.contains(&arg.as_str());
     match args.first() {
         Some(first) if decision_flag(first) => true,
-        Some(first) if first.starts_with('-') || matches!(first.as_str(), "config" | "herdr" | "last") => {
+        Some(first)
+            if first.starts_with('-') || matches!(first.as_str(), "config" | "herdr" | "rex" | "last") =>
+        {
             false
         }
         Some(_) => args.iter().skip(1).any(decision_flag),
@@ -441,9 +445,9 @@ pub(crate) fn last_command(args: &[String]) -> Result<()> {
     crate::last::run(&options)
 }
 
-/// A gated review in a Herdr pane: the agent hears the decision through delivery, and the
+/// A gated review in a Herdr or Rex pane: the agent hears the decision through delivery, and the
 /// result file, when asked for, records it. The pane has no caller reading its stdout.
-fn gated_pane(path: &PathBuf, result_file: Option<&Path>) -> Result<()> {
+pub(crate) fn gated_pane(path: &PathBuf, result_file: Option<&Path>) -> Result<()> {
     if let Some(file) = result_file {
         gate::check_result_file(file)?;
     }
