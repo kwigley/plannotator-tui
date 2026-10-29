@@ -6,7 +6,8 @@
 //! edit. Before writing anything it checks that the agent's process still runs in the block,
 //! so a block that fell back to a shell never receives the text, and asks the block's
 //! `program_status` whether the agent is at a dialog, the same refusal Herdr gives with
-//! `agent_blocked`.
+//! `agent_blocked`. A send also needs the agent to have reported its state there at all: an
+//! agent that has not could be at a dialog Rex cannot see.
 
 use std::cell::RefCell;
 
@@ -76,6 +77,15 @@ impl Delivery for RexAgent {
         if let Some(reason) = blocked_reason(&status) {
             return Err(DeliveryError::Blocked(format!("{} is {reason}", self.describe())));
         }
+        // Without a report from the agent, Rex cannot say it is not at a dialog, and Enter
+        // there would answer it. Herdr refuses an agent it cannot read the same way.
+        if self.submit && !reports_state(&status, self.pid) {
+            let who = self.agent.as_deref().unwrap_or("the agent");
+            return Err(DeliveryError::Unavailable(format!(
+                "{who} in {} has not reported its state to Rex",
+                short_id(&self.block)
+            )));
+        }
         if self.pasted.borrow().as_deref() != Some(feedback) {
             let paste = json!({
                 "block_id": self.block,
@@ -116,6 +126,15 @@ pub(crate) fn blocked_reason(status: &Value) -> Option<String> {
         Some("question") => "waiting for an answer to its question".to_owned(),
         Some("auth") => "waiting for a credential".to_owned(),
         _ => "waiting for you".to_owned(),
+    })
+}
+
+/// Whether the agent, process `pid`, has reported its state in `program_status` JSON. Rex
+/// keeps a `done` record after its program exits, so only a record the agent owns counts.
+pub(crate) fn reports_state(status: &Value, pid: u32) -> bool {
+    let records = status.get("records").and_then(Value::as_array);
+    records.is_some_and(|records| {
+        records.iter().any(|r| r.pointer("/owner/pid").and_then(Value::as_u64) == Some(u64::from(pid)))
     })
 }
 
@@ -172,8 +191,21 @@ mod tests {
         assert_eq!(blocked_reason(&unknown).as_deref(), Some("waiting for you"));
     }
 
+    #[test]
+    fn only_a_record_the_agent_owns_says_it_has_reported_its_state() {
+        assert!(!reports_state(&json!({"records":[]}), 42));
+        assert!(!reports_state(&json!({}), 42));
+        let mine = json!({"records":[{"state":"idle","owner":{"pid":42,"name":"2.1.312"}}]});
+        assert!(reports_state(&mine, 42));
+        // A `done` record outlives its program; one left by an earlier process says nothing.
+        let earlier = json!({"records":[{"state":"done","owner":{"pid":41,"name":"2.1.312"}}]});
+        assert!(!reports_state(&earlier, 42));
+        assert!(!reports_state(&json!({"records":[{"state":"idle"}]}), 42));
+    }
+
     /// A `rex` that logs its arguments and answers the calls a send makes. The foreground
-    /// process is pid 42; `enter-fails` in the directory makes `send-key` fail.
+    /// process is pid 42 and reports itself idle; `silent` in the directory makes it report
+    /// nothing, and `enter-fails` makes `send-key` fail.
     #[cfg(unix)]
     fn fake_rex(tag: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
@@ -184,7 +216,9 @@ mod tests {
 echo "$1 $2" >> {dir}/log
 case "$1 $2" in
   "do com.superlogical.terminal.process") echo '{{"foreground":{{"pid":42,"argv0":"claude"}}}}' ;;
-  "do com.superlogical.terminal.program_status") echo '{{"records":[]}}' ;;
+  "do com.superlogical.terminal.program_status")
+    if [ -f {dir}/silent ]; then echo '{{"records":[]}}'
+    else echo '{{"records":[{{"state":"idle","owner":{{"pid":42,"name":"claude"}}}}]}}'; fi ;;
   "api call") cat > /dev/null; echo '{{}}' ;;
   "send-key -b") if [ -f {dir}/enter-fails ]; then echo boom >&2; exit 1; fi ;;
 esac
@@ -198,15 +232,21 @@ esac
 
     #[cfg(unix)]
     fn sender(dir: &std::path::Path, pid: &str) -> RexAgent {
+        sender_with(dir, pid, &[])
+    }
+
+    #[cfg(unix)]
+    fn sender_with(dir: &std::path::Path, pid: &str, extra: &[(&str, &str)]) -> RexAgent {
         let bin = dir.display().to_string();
-        agent(&[
-            ("REX_BIN_DIR", &bin),
+        let mut vars = vec![
+            ("REX_BIN_DIR", bin.as_str()),
             ("REX_SESSION", "session:a"),
             (BLOCK_VAR, "block:b"),
             (PID_VAR, pid),
             (AGENT_VAR, "claude"),
-        ])
-        .expect("a target")
+        ];
+        vars.extend_from_slice(extra);
+        agent(&vars).expect("a target")
     }
 
     #[cfg(unix)]
@@ -226,6 +266,22 @@ esac
         assert_eq!(pastes(&dir), 1);
         target.deliver("notes").expect("a later send");
         assert_eq!(pastes(&dir), 2, "a send that landed starts over");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_that_has_not_reported_its_state_gets_no_enter_but_can_take_a_paste() {
+        let dir = fake_rex("silent");
+        std::fs::write(dir.join("silent"), "").expect("flag");
+        let target = sender(&dir, "42");
+        assert!(matches!(target.deliver("notes"), Err(DeliveryError::Unavailable(_))));
+        assert_eq!(pastes(&dir), 0);
+        let paste = sender_with(&dir, "42", &[(SUBMIT_VAR, "0")]);
+        paste.deliver("notes").expect("a paste leaves Enter to you");
+        assert_eq!(pastes(&dir), 1);
+        let log = std::fs::read_to_string(dir.join("log")).expect("log");
+        assert!(!log.lines().any(|l| l.starts_with("send-key")), "no Enter: {log}");
         std::fs::remove_dir_all(dir).ok();
     }
 

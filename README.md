@@ -327,7 +327,9 @@ The pane is `--block <id>`, else `REX_BLOCK`, so an agent that runs a launcher i
 shell reviews itself; that is how it hands you a plan. `--paste` puts the feedback in the
 agent's prompt without pressing Enter and focuses the agent's pane, so you can edit it first;
 the header says `claude prompt in a1d6db`. A send waits while Rex reports the agent blocked on
-a permission prompt or a question, as it does in Herdr. Rex does not report its theme to
+a permission prompt or a question, as it does in Herdr. It also needs the agent to report its
+state to Rex (Claude Code and Codex do): until it has, the review copies instead, since Enter
+could answer a dialog Rex cannot see, and `--paste` still works. Rex does not report its theme to
 programs, so with a light Rex theme set `[ui] theme = "light"`.
 
 ## Agent replies
