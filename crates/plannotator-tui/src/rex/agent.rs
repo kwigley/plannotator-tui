@@ -72,7 +72,10 @@ impl Delivery for RexAgent {
         let process = self.rex.terminal_method(&self.block, "process").map_err(unavailable)?;
         if foreground(&process).map(|fg| fg.pid) != Some(self.pid) {
             let who = self.agent.as_deref().unwrap_or("the agent");
-            return Err(DeliveryError::Unavailable(format!("{who} no longer runs in {}", self.describe())));
+            return Err(DeliveryError::Unavailable(format!(
+                "{who} no longer runs in {}",
+                short_id(&self.block)
+            )));
         }
         let status = self.rex.terminal_method(&self.block, "program_status").map_err(unavailable)?;
         if let Some(reason) = blocked_reason(&status) {
@@ -295,7 +298,9 @@ esac
     fn nothing_is_written_once_the_agent_has_left_the_block() {
         let dir = fake_rex("gone");
         let target = sender(&dir, "43");
-        assert!(matches!(target.deliver("notes"), Err(DeliveryError::Unavailable(_))));
+        let err = target.deliver("notes").expect_err("refused");
+        let named_once = |m: &str| m.starts_with("claude no longer runs in ") && !m.contains("claude in");
+        assert!(matches!(&err, DeliveryError::Unavailable(m) if named_once(m)), "{err}");
         assert_eq!(pastes(&dir), 0);
         std::fs::remove_dir_all(dir).ok();
     }
