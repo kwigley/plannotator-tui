@@ -7,7 +7,8 @@ description: Open a Markdown plan or document for the human to review and annota
 
 Only when `HERDR_ENV=1` (you are running inside Herdr) or `REX_BLOCK` is set (inside Rex).
 Otherwise tell the human where the file is and ask them to review it. Inside Rex, use
-`plannotator-tui rex open` in step 2 instead of `plannotator-tui herdr open`.
+`plannotator-tui rex open` wherever this says `plannotator-tui herdr open`; `--gate` works the
+same.
 
 1. Write the document to a file. Do not paste it into chat as well.
 2. Open it for review, from your own pane:
